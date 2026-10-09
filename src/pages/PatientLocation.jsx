@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
-const MAX_ACCURACY_METERS = 100
+const IDEAL_ACCURACY_METERS = 100
+const MAX_ACCURACY_METERS = 5000
 
 export default function PatientLocation() {
   const { token } = useParams()
@@ -11,13 +12,51 @@ export default function PatientLocation() {
   const [loadingStep, setLoadingStep] = useState('') // 'getting' | 'sending'
   const [errorMsg, setErrorMsg] = useState('')
   const [accuracyInfo, setAccuracyInfo] = useState(null)
+  const [coords, setCoords] = useState(null) // { latitude, longitude }
   const [isSuccess, setIsSuccess] = useState(false)
   const [successMsg, setSuccessMsg] = useState('')
 
-  const handleSendLocation = () => {
+  const sendLocationToServer = async (latitude, longitude) => {
+    setLoading(true)
+    setLoadingStep('sending')
+    setErrorMsg('')
+
+    try {
+      const { data, error } = await supabase.rpc('simpan_lokasi_pasien', {
+        p_token: token,
+        p_latitude: latitude,
+        p_longitude: longitude
+      })
+
+      if (error) {
+        throw error
+      }
+
+      if (data && data.success === true) {
+        setIsSuccess(true)
+        setSuccessMsg(
+          data.message ||
+          'Terima kasih. Lokasi Anda sudah diterima dan pengantaran obat akan diproses.'
+        )
+      } else {
+        setErrorMsg(
+          (data && data.message) ||
+          'Gagal menyimpan lokasi. Pasien atau token tidak ditemukan.'
+        )
+      }
+    } catch (err) {
+      console.error('Error simpan_lokasi_pasien:', err)
+      setErrorMsg(err.message || 'Terjadi kesalahan saat mengirim lokasi ke server.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleGetLocation = () => {
     setErrorMsg('')
     setSuccessMsg('')
     setAccuracyInfo(null)
+    setCoords(null)
 
     if (!token) {
       setErrorMsg('Token lokasi tidak ditemukan pada URL.')
@@ -43,6 +82,7 @@ export default function PatientLocation() {
         const { latitude, longitude, accuracy } = position.coords
         const accuracyRounded = Math.round(accuracy)
         setAccuracyInfo(accuracyRounded)
+        setCoords({ latitude, longitude })
 
         // Validasi koordinat
         if (
@@ -58,45 +98,20 @@ export default function PatientLocation() {
           return
         }
 
-        // Validasi akurasi lokasi
+        // Jika akurasi melebihi batas maksimal 5km
         if (accuracy > MAX_ACCURACY_METERS) {
           setErrorMsg(
-            `Lokasi Anda kurang akurat (±${accuracyRounded} meter). Silakan aktifkan GPS/Lokasi dengan akurasi tinggi, lalu coba lagi.`
+            `Lokasi Anda terlalu jauh/tidak presisi (±${accuracyRounded} meter). Silakan aktifkan GPS/Lokasi perangkat, lalu coba lagi.`
           )
           setLoading(false)
           return
         }
 
-        setLoadingStep('sending')
-
-        try {
-          // Panggil RPC Supabase simpan_lokasi_pasien
-          const { data, error } = await supabase.rpc('simpan_lokasi_pasien', {
-            p_token: token,
-            p_latitude: latitude,
-            p_longitude: longitude
-          })
-
-          if (error) {
-            throw error
-          }
-
-          // RPC mengembalikan JSON { success, message, patient_id }
-          if (data && data.success === true) {
-            setIsSuccess(true)
-            setSuccessMsg(
-              data.message ||
-                'Terima kasih. Lokasi Anda sudah diterima dan pengantaran obat akan diproses.'
-            )
-          } else {
-            setErrorMsg(
-              (data && data.message) ||
-                'Gagal menyimpan lokasi. Pasien atau token tidak ditemukan.'
-            )
-          }
-        } catch (err) {
-          setErrorMsg(err.message || 'Terjadi kesalahan saat mengirim lokasi ke server.')
-        } finally {
+        // Jika akurasi bagus (<= 100m), langsung kirim ke server
+        if (accuracy <= IDEAL_ACCURACY_METERS) {
+          await sendLocationToServer(latitude, longitude)
+        } else {
+          // Akurasi sedang/Wi-Fi (100m - 5000m): tampilkan peringatan tetapi izinkan kirim lokasi
           setLoading(false)
         }
       },
@@ -125,6 +140,12 @@ export default function PatientLocation() {
       },
       options
     )
+  }
+
+  const handleForceSend = async () => {
+    if (coords && coords.latitude && coords.longitude) {
+      await sendLocationToServer(coords.latitude, coords.longitude)
+    }
   }
 
   return (
@@ -167,16 +188,25 @@ export default function PatientLocation() {
                     💡 Pastikan Anda berada di lokasi pasien dan GPS/Lokasi perangkat aktif.
                   </p>
 
+                  {/* Informasi Akurasi */}
                   {accuracyInfo !== null && (
                     <div className="mb-3">
-                      {accuracyInfo <= MAX_ACCURACY_METERS ? (
+                      {accuracyInfo <= IDEAL_ACCURACY_METERS ? (
                         <span className="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
-                          Akurasi lokasi: ±{accuracyInfo} meter
+                          Akurasi lokasi sangat baik: ±{accuracyInfo} meter
                         </span>
                       ) : (
-                        <span className="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle px-3 py-2">
-                          ⚠️ Lokasi kurang akurat: ±{accuracyInfo} meter
-                        </span>
+                        <div className="alert alert-warning py-2 px-3 mb-0 small text-start">
+                          <div className="fw-bold mb-1">
+                            ⚠️ Akurasi Lokasi: ±{accuracyInfo} meter
+                          </div>
+                          <p className="mb-1 text-secondary">
+                            Akurasi kurang presisi (biasanya terjadi jika membuka dari Laptop/PC atau Wi-Fi tanpa hardware GPS).
+                          </p>
+                          <p className="mb-0 text-muted fst-italic">
+                            💡 Untuk akurasi terbaik (±10m), silakan buka link ini melalui Smartphone dengan GPS aktif.
+                          </p>
+                        </div>
                       )}
                     </div>
                   )}
@@ -194,29 +224,49 @@ export default function PatientLocation() {
                   )}
 
                   <div className="d-grid gap-2">
-                    <button
-                      type="button"
-                      className="btn btn-primary btn-lg py-3 fw-bold shadow-sm"
-                      onClick={handleSendLocation}
-                      disabled={loading}
-                    >
-                      {loading ? (
-                        <>
-                          <span
-                            className="spinner-border spinner-border-sm me-2"
-                            role="status"
-                            aria-hidden="true"
-                          ></span>
-                          {loadingStep === 'getting'
-                            ? '📍 Mengambil lokasi...'
-                            : 'Mengirim lokasi...'}
-                        </>
-                      ) : errorMsg || (accuracyInfo !== null && accuracyInfo > MAX_ACCURACY_METERS) ? (
-                        '📍 Coba Lagi'
-                      ) : (
-                        '📍 Kirim Lokasi Saya Saat Ini'
-                      )}
-                    </button>
+                    {/* Tombol kirim paksa jika akurasi > 100m tetapi <= 5000m */}
+                    {accuracyInfo !== null && accuracyInfo > IDEAL_ACCURACY_METERS && coords && !loading ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-warning btn-lg py-3 fw-bold shadow-sm text-dark"
+                          onClick={handleForceSend}
+                        >
+                          📍 Tetap Kirim Lokasi Ini (±{accuracyInfo}m)
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline-secondary btn-sm py-2"
+                          onClick={handleGetLocation}
+                        >
+                          🔄 Ambil Ulang GPS
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-lg py-3 fw-bold shadow-sm"
+                        onClick={handleGetLocation}
+                        disabled={loading}
+                      >
+                        {loading ? (
+                          <>
+                            <span
+                              className="spinner-border spinner-border-sm me-2"
+                              role="status"
+                              aria-hidden="true"
+                            ></span>
+                            {loadingStep === 'getting'
+                              ? '📍 Mengambil lokasi GPS...'
+                              : 'Mengirim lokasi...'}
+                          </>
+                        ) : errorMsg ? (
+                          '📍 Coba Lagi'
+                        ) : (
+                          '📍 Kirim Lokasi Saya Saat Ini'
+                        )}
+                      </button>
+                    )}
                   </div>
                 </>
               )}

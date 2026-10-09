@@ -3,12 +3,21 @@ import { supabase } from '../lib/supabase'
 import PatientForm from '../components/PatientForm'
 import RequestLocationButton from '../components/RequestLocationButton'
 import DeliveryStart from '../components/DeliveryStart'
+import PatientEditModal from '../components/PatientEditModal'
+import { getJakartaDateString } from '../lib/utils'
 
 export default function Dashboard() {
   const [pasienList, setPasienList] = useState([])
   const [loading, setLoading] = useState(true)
   const [errorMsg, setErrorMsg] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [editingPasien, setEditingPasien] = useState(null)
+
+  // Penutupan Hari Operasional State
+  const [currentDate] = useState(() => getJakartaDateString())
+  const [dayStatus, setDayStatus] = useState(null) // 'BUKA' | 'TUTUP' | null
+  const [closingDay, setClosingDay] = useState(false)
+  const [closureAlert, setClosureAlert] = useState(null) // { type: 'success' | 'danger' | 'warning', text: '' }
 
   const fetchPasien = async (showLoadingSpinner = true) => {
     if (showLoadingSpinner) {
@@ -33,23 +42,52 @@ export default function Dashboard() {
     }
   }
 
+  const fetchDayStatus = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('hari_operasional')
+        .select('status')
+        .eq('tanggal_operasional', currentDate)
+        .maybeSingle()
+
+      if (error && error.code !== 'PGRST116') {
+        console.error('Error fetching day status:', error)
+        return
+      }
+
+      if (data && data.status) {
+        setDayStatus(data.status)
+      } else {
+        setDayStatus('BUKA')
+      }
+    } catch (err) {
+      console.error('Error fetching day status:', err)
+      setDayStatus('BUKA')
+    }
+  }
+
   useEffect(() => {
     let isSubscribed = true
 
     const loadInitialData = async () => {
       setErrorMsg('')
       try {
-        const { data, error } = await supabase
-          .from('pasien')
-          .select('*')
-          .order('created_at', { ascending: false })
+        const [pasienRes, dayRes] = await Promise.all([
+          supabase.from('pasien').select('*').order('created_at', { ascending: false }),
+          supabase.from('hari_operasional').select('status').eq('tanggal_operasional', currentDate).maybeSingle()
+        ])
 
-        if (error) {
-          throw error
+        if (pasienRes.error) {
+          throw pasienRes.error
         }
 
         if (isSubscribed) {
-          setPasienList(data || [])
+          setPasienList(pasienRes.data || [])
+          if (dayRes.data && dayRes.data.status) {
+            setDayStatus(dayRes.data.status)
+          } else {
+            setDayStatus('BUKA')
+          }
         }
       } catch (err) {
         if (isSubscribed) {
@@ -67,7 +105,62 @@ export default function Dashboard() {
     return () => {
       isSubscribed = false
     }
-  }, [])
+  }, [currentDate])
+
+
+  const handleTutupHari = async () => {
+    setClosureAlert(null)
+    const confirmClose = window.confirm(
+      `Apakah Anda yakin ingin menyelesaikan hari operasional untuk tanggal (${currentDate})?\n\nHari operasional hanya boleh ditutup jika semua paket berstatus SELESAI.`
+    )
+    if (!confirmClose) return
+
+    setClosingDay(true)
+
+    try {
+      const { data, error } = await supabase.rpc('tutup_hari_operasional', {
+        p_tanggal: currentDate
+      })
+
+      if (error) {
+        throw error
+      }
+
+      if (data && data.success === true) {
+        setClosureAlert({
+          type: 'success',
+          text: data.message || `Hari operasional ${currentDate} berhasil ditutup.`
+        })
+        setDayStatus('TUTUP')
+        await fetchPasien(false)
+      } else {
+        const unfinishedCount = data?.jumlah_belum_selesai || data?.unfinished_count
+        let detailText = (data && data.message) || 'Gagal menutup hari operasional.'
+        if (unfinishedCount) {
+          detailText += ` (Terdapat ${unfinishedCount} paket yang belum SELESAI).`
+        }
+        setClosureAlert({
+          type: 'danger',
+          text: detailText
+        })
+      }
+    } catch (err) {
+      console.error('Error tutup_hari_operasional:', err)
+      if (err.code === '42501' || err.message?.includes('permission denied')) {
+        setClosureAlert({
+          type: 'danger',
+          text: 'Izin akses RPC tutup_hari_operasional belum diberikan ke role anon/authenticated di Supabase. Silakan jalankan script GRANT EXECUTE di Supabase SQL Editor.'
+        })
+      } else {
+        setClosureAlert({
+          type: 'danger',
+          text: err.message || 'Terjadi kesalahan saat menutup hari operasional.'
+        })
+      }
+    } finally {
+      setClosingDay(false)
+    }
+  }
 
   const renderStatusBadge = (status) => {
     switch (status) {
@@ -87,6 +180,12 @@ export default function Dashboard() {
   const handleFormSuccess = () => {
     setShowForm(false)
     fetchPasien(false)
+    fetchDayStatus()
+  }
+
+  const handleEditSuccess = () => {
+    setEditingPasien(null)
+    fetchPasien(false)
   }
 
   return (
@@ -95,20 +194,67 @@ export default function Dashboard() {
       <header className="pb-3 mb-4 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2">
         <div>
           <h1 className="h3 mb-1 text-primary fw-bold">Sistem Pengantaran Obat</h1>
-          <p className="text-muted mb-0">Manajemen Pasien & Pengantaran</p>
+          <div className="d-flex align-items-center gap-2 flex-wrap">
+            <span className="text-muted small">Manajemen Pasien &amp; Pengantaran</span>
+            <span className="badge bg-light text-dark border font-monospace">
+              📅 {currentDate} (WIB)
+            </span>
+            {dayStatus === 'TUTUP' ? (
+              <span className="badge bg-danger">🔒 Hari Ini Ditutup</span>
+            ) : (
+              <span className="badge bg-success">🟢 Hari Operasional Buka</span>
+            )}
+          </div>
         </div>
-        <div>
+
+        <div className="d-flex align-items-center gap-2">
+          {/* Tombol Selesaikan Hari Ini */}
           <button
             type="button"
-            className="btn btn-primary d-inline-flex align-items-center gap-1 shadow-sm"
+            className="btn btn-outline-danger d-inline-flex align-items-center gap-1 shadow-sm fw-bold"
+            onClick={handleTutupHari}
+            disabled={closingDay || dayStatus === 'TUTUP'}
+            title={dayStatus === 'TUTUP' ? 'Hari operasional ini sudah ditutup' : 'Selesaikan dan tutup hari ini'}
+          >
+            {closingDay ? (
+              <>
+                <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                Menutup Hari...
+              </>
+            ) : dayStatus === 'TUTUP' ? (
+              <>🔒 Hari Ditutup</>
+            ) : (
+              <>🔒 Selesaikan Hari Ini</>
+            )}
+          </button>
+
+          {/* Tombol Tambah Pasien */}
+          <button
+            type="button"
+            className="btn btn-primary d-inline-flex align-items-center gap-1 shadow-sm fw-bold"
             onClick={() => setShowForm(true)}
+            disabled={dayStatus === 'TUTUP'}
+            title={dayStatus === 'TUTUP' ? 'Hari operasional sudah ditutup, paket baru tidak dapat dibuat.' : 'Tambah Pasien Baru'}
           >
             <span className="fs-5 lh-1">+</span> Tambah Pasien
           </button>
         </div>
       </header>
 
-      {/* Modal / Form Container */}
+      {/* Alert Notifikasi Penutupan Hari */}
+      {closureAlert && (
+        <div className={`alert alert-${closureAlert.type} alert-dismissible fade show mb-4`} role="alert">
+          <div>{closureAlert.text}</div>
+          <button
+            type="button"
+            className="btn-close"
+            onClick={() => setClosureAlert(null)}
+            aria-label="Close"
+          ></button>
+        </div>
+      )}
+
+      {/* Modal Form Tambah Pasien */}
       {showForm && (
         <div
           className="modal fade show d-block"
@@ -136,6 +282,15 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal Edit Pasien */}
+      {editingPasien && (
+        <PatientEditModal
+          pasien={editingPasien}
+          onSuccess={handleEditSuccess}
+          onClose={() => setEditingPasien(null)}
+        />
       )}
 
       {/* Main Content Area */}
@@ -179,6 +334,7 @@ export default function Dashboard() {
                 type="button"
                 className="btn btn-primary"
                 onClick={() => setShowForm(true)}
+                disabled={dayStatus === 'TUTUP'}
               >
                 + Tambah Pasien
               </button>
@@ -216,7 +372,7 @@ export default function Dashboard() {
                       </div>
 
                       {pasien.alamat_google_maps && (
-                        <div className="text-truncate">
+                        <div className="text-truncate mb-1">
                           <span className="text-muted">Google Maps: </span>
                           <a
                             href={pasien.alamat_google_maps}
@@ -228,14 +384,36 @@ export default function Dashboard() {
                           </a>
                         </div>
                       )}
+
+                      {pasien.tanggal_operasional && (
+                        <div className="text-muted fs-7">
+                          <span>📅 Tgl Operasional: </span>
+                          <span className="font-monospace">{pasien.tanggal_operasional}</span>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Tombol Minta Lokasi hanya untuk status MENUNGGU_LOKASI */}
-                    {pasien.status === 'MENUNGGU_LOKASI' && (
-                      <div className="pt-2 mt-2 border-top">
-                        <RequestLocationButton pasien={pasien} />
-                      </div>
-                    )}
+                    {/* Action Bar (Edit & Minta Lokasi) */}
+                    <div className="pt-2 mt-2 border-top d-flex gap-2">
+                      {/* Tombol Edit Pasien hanya untuk status belum SELESAI */}
+                      {pasien.status !== 'SELESAI' && (
+                        <button
+                          type="button"
+                          className="btn btn-outline-primary btn-sm d-inline-flex align-items-center gap-1 shadow-sm flex-fill justify-content-center"
+                          onClick={() => setEditingPasien(pasien)}
+                          title="Edit data pasien"
+                        >
+                          <span>✏️</span> Edit
+                        </button>
+                      )}
+
+                      {/* Tombol Minta Lokasi hanya untuk status MENUNGGU_LOKASI */}
+                      {pasien.status === 'MENUNGGU_LOKASI' && (
+                        <div className="flex-fill">
+                          <RequestLocationButton pasien={pasien} />
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
