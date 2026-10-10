@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
+import { User, MapPin, Phone, Globe, Check, AlertCircle, Loader2 } from 'lucide-react'
 
 export default function PatientForm({ onSuccess, onCancel }) {
   const [nama, setNama] = useState('')
@@ -13,16 +14,18 @@ export default function PatientForm({ onSuccess, onCancel }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (loading) return
+
     setErrorMsg('')
     setSuccessMsg('')
 
-    // Validasi minimal
+    // Validasi input
     if (!nama.trim()) {
       setErrorMsg('Nama pasien wajib diisi.')
       return
     }
     if (!alamat.trim()) {
-      setErrorMsg('Alamat wajib diisi.')
+      setErrorMsg('Alamat pasien wajib diisi.')
       return
     }
     if (!nomorWa.trim()) {
@@ -48,15 +51,15 @@ export default function PatientForm({ onSuccess, onCancel }) {
         throw error
       }
 
-      setSuccessMsg('Pasien berhasil ditambahkan!')
+      setSuccessMsg('Data pasien berhasil ditambahkan ke daftar operasional.')
       setNama('')
       setAlamat('')
       setNomorWa('')
       setAlamatGoogleMaps('')
 
-      if (onSuccess) {
-        onSuccess()
-      }
+      setTimeout(() => {
+        if (onSuccess) onSuccess()
+      }, 600)
     } catch (err) {
       setErrorMsg(err.message || 'Gagal menyimpan data pasien.')
     } finally {
@@ -65,21 +68,25 @@ export default function PatientForm({ onSuccess, onCancel }) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="needs-validation">
+    <form onSubmit={handleSubmit} noValidate>
       {errorMsg && (
-        <div className="alert alert-danger py-2 small" role="alert">
-          {errorMsg}
+        <div className="alert alert-danger py-2.5 px-3 small text-break-word d-flex align-items-center gap-2 mb-3 rounded-3" role="alert">
+          <AlertCircle size={16} className="text-danger flex-shrink-0" />
+          <div>{errorMsg}</div>
         </div>
       )}
       {successMsg && (
-        <div className="alert alert-success py-2 small" role="alert">
-          {successMsg}
+        <div className="alert alert-success py-2.5 px-3 small text-break-word d-flex align-items-center gap-2 mb-3 rounded-3" role="alert">
+          <Check size={16} className="text-success flex-shrink-0" />
+          <div>{successMsg}</div>
         </div>
       )}
 
       <div className="mb-3">
-        <label htmlFor="nama" className="form-label fw-bold">
-          Nama Pasien <span className="text-danger">*</span>
+        <label htmlFor="nama" className="form-label d-flex align-items-center gap-1.5">
+          <User size={15} className="text-navy-500" />
+          <span>Nama Pasien</span>
+          <span className="text-danger">*</span>
         </label>
         <input
           type="text"
@@ -90,12 +97,15 @@ export default function PatientForm({ onSuccess, onCancel }) {
           onChange={(e) => setNama(e.target.value)}
           disabled={loading}
           required
+          autoFocus
         />
       </div>
 
       <div className="mb-3">
-        <label htmlFor="alamat" className="form-label fw-bold">
-          Alamat Pasien <span className="text-danger">*</span>
+        <label htmlFor="alamat" className="form-label d-flex align-items-center gap-1.5">
+          <MapPin size={15} className="text-navy-500" />
+          <span>Alamat Lengkap</span>
+          <span className="text-danger">*</span>
         </label>
         <textarea
           id="alamat"
@@ -110,8 +120,10 @@ export default function PatientForm({ onSuccess, onCancel }) {
       </div>
 
       <div className="mb-3">
-        <label htmlFor="nomorWa" className="form-label fw-bold">
-          Nomor WhatsApp <span className="text-danger">*</span>
+        <label htmlFor="nomorWa" className="form-label d-flex align-items-center gap-1.5">
+          <Phone size={15} className="text-navy-500" />
+          <span>Nomor WhatsApp</span>
+          <span className="text-danger">*</span>
         </label>
         <input
           type="tel"
@@ -123,16 +135,21 @@ export default function PatientForm({ onSuccess, onCancel }) {
           disabled={loading}
           required
         />
+        <div className="form-text text-navy-500 small mt-1">
+          Nomor aktif yang digunakan untuk mengirim link konfirmasi lokasi pengantaran.
+        </div>
       </div>
 
-      <div className="mb-3">
-        <label htmlFor="alamatGoogleMaps" className="form-label fw-bold">
-          Alamat Google Maps <span className="text-muted font-monospace fs-7">(Opsional)</span>
+      <div className="mb-4">
+        <label htmlFor="alamatGoogleMaps" className="form-label d-flex align-items-center gap-1.5">
+          <Globe size={15} className="text-navy-500" />
+          <span>Link Google Maps</span>
+          <span className="badge bg-light text-navy-600 border fw-normal ms-1">Opsional</span>
         </label>
         <input
           type="url"
           id="alamatGoogleMaps"
-          className="form-control"
+          className="form-control font-monospace small"
           placeholder="https://maps.google.com/..."
           value={alamatGoogleMaps}
           onChange={(e) => setAlamatGoogleMaps(e.target.value)}
@@ -140,11 +157,11 @@ export default function PatientForm({ onSuccess, onCancel }) {
         />
       </div>
 
-      <div className="d-flex justify-content-end gap-2 pt-2">
+      <div className="d-flex flex-column-reverse flex-sm-row justify-content-sm-end gap-2 pt-2 border-top">
         {onCancel && (
           <button
             type="button"
-            className="btn btn-secondary"
+            className="btn btn-secondary btn-touch px-4"
             onClick={onCancel}
             disabled={loading}
           >
@@ -153,16 +170,19 @@ export default function PatientForm({ onSuccess, onCancel }) {
         )}
         <button
           type="submit"
-          className="btn btn-primary"
+          className="btn btn-primary btn-touch px-4"
           disabled={loading}
         >
           {loading ? (
             <>
-              <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-              Menyimpan...
+              <Loader2 size={16} className="spinner-border-sm animate-spin" />
+              <span>Menyimpan Data...</span>
             </>
           ) : (
-            'Simpan Pasien'
+            <>
+              <Check size={16} />
+              <span>Simpan Pasien</span>
+            </>
           )}
         </button>
       </div>
