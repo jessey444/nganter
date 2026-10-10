@@ -165,6 +165,36 @@ h1, h2, h3, h4, h5, h6 {
   gap: 6px;
 }
 
+.header-date-input {
+  border: 1px solid var(--navy-200);
+  background-color: #ffffff;
+  color: var(--navy-800);
+  border-radius: var(--radius-md);
+  font-size: 0.825rem;
+  font-weight: 600;
+  padding: 5px 10px;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+}
+
+.header-date-input:focus {
+  border-color: var(--primary-500);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.history-banner {
+  background-color: #f1f5f9;
+  border: 1px solid var(--navy-200);
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .pulse-dot {
   width: 8px;
   height: 8px;

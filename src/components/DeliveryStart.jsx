@@ -14,7 +14,7 @@ import {
   Radio
 } from 'lucide-react'
 
-export default function DeliveryStart() {
+export default function DeliveryStart({ selectedDate, readOnly = false, refreshTrigger = 0 }) {
   const [loading, setLoading] = useState(false)
   const [loadingStep, setLoadingStep] = useState('') // 'gps' | 'rpc'
   const [startingId, setStartingId] = useState(null) // ID pasien yang sedang diproses mulai pengantaran
@@ -28,11 +28,16 @@ export default function DeliveryStart() {
   // Fetch ongoing deliveries (status DALAM_PENGANTARAN) with joined pasien data
   const fetchOngoingDeliveries = async () => {
     try {
-      const { data, error } = await supabase
+      let query = supabase
         .from('pengantaran')
-        .select('id, pasien_id, urutan, jarak_km, waktu_mulai, status, pasien ( nama, alamat )')
+        .select('id, pasien_id, urutan, jarak_km, waktu_mulai, status, pasien!inner ( nama, alamat, tanggal_operasional )')
         .eq('status', 'DALAM_PENGANTARAN')
-        .order('urutan', { ascending: true })
+
+      if (selectedDate) {
+        query = query.eq('pasien.tanggal_operasional', selectedDate)
+      }
+
+      const { data, error } = await query.order('urutan', { ascending: true })
       if (error) throw error
       setOngoingDeliveries(data || [])
     } catch (err) {
@@ -41,21 +46,25 @@ export default function DeliveryStart() {
     }
   }
 
-  // Fetch ongoing deliveries on mount
+  // Fetch ongoing deliveries on mount and whenever selectedDate or refreshTrigger changes
   useEffect(() => {
     let ignore = false
-    supabase
+    let query = supabase
       .from('pengantaran')
-      .select('id, pasien_id, urutan, jarak_km, waktu_mulai, status, pasien ( nama, alamat )')
+      .select('id, pasien_id, urutan, jarak_km, waktu_mulai, status, pasien!inner ( nama, alamat, tanggal_operasional )')
       .eq('status', 'DALAM_PENGANTARAN')
-      .order('urutan', { ascending: true })
-      .then(({ data, error }) => {
-        if (!ignore && !error) {
-          setOngoingDeliveries(data || [])
-        }
-      })
+
+    if (selectedDate) {
+      query = query.eq('pasien.tanggal_operasional', selectedDate)
+    }
+
+    query.order('urutan', { ascending: true }).then(({ data, error }) => {
+      if (!ignore && !error) {
+        setOngoingDeliveries(data || [])
+      }
+    })
     return () => { ignore = true }
-  }, [])
+  }, [selectedDate, refreshTrigger])
 
   const handleStartDelivery = () => {
     setErrorMsg('')
@@ -95,7 +104,13 @@ export default function DeliveryStart() {
             throw error
           }
 
-          setNearbyPatients(data || [])
+          // Filter di frontend jika data mengembalikan tanggal_operasional
+          let patients = data || []
+          if (selectedDate) {
+            patients = patients.filter((p) => !p.tanggal_operasional || p.tanggal_operasional === selectedDate)
+          }
+
+          setNearbyPatients(patients)
         } catch (err) {
           setErrorMsg(err.message || 'Gagal mengambil daftar pasien terdekat.')
         } finally {
@@ -130,7 +145,11 @@ export default function DeliveryStart() {
         p_latitude: courierLocation.latitude,
         p_longitude: courierLocation.longitude
       })
-      setNearbyPatients(data || [])
+      let patients = data || []
+      if (selectedDate) {
+        patients = patients.filter((p) => !p.tanggal_operasional || p.tanggal_operasional === selectedDate)
+      }
+      setNearbyPatients(patients)
     } catch (err) {
       console.error('Gagal memperbarui daftar pasien terdekat:', err)
     }
@@ -254,6 +273,13 @@ export default function DeliveryStart() {
       </div>
 
       <div className="p-3 p-sm-4">
+        {readOnly && (
+          <div className="alert alert-secondary py-2 px-3 small d-flex align-items-center gap-2 mb-3 rounded-3 border">
+            <Lock size={15} className="text-navy-600 flex-shrink-0" />
+            <span className="fw-medium">Mode Riwayat (Read-Only): Operasi rute dan pengantaran dinonaktifkan untuk tanggal ini.</span>
+          </div>
+        )}
+
         {/* Action Banner */}
         <div className="p-3 p-md-3.5 bg-light rounded-3 border d-flex flex-column flex-md-row align-items-start align-items-md-center justify-content-between gap-3 mb-3">
           <div>
@@ -267,7 +293,8 @@ export default function DeliveryStart() {
               type="button"
               className="btn btn-primary btn-touch w-100 w-md-auto px-4 py-2 fw-bold"
               onClick={handleStartDelivery}
-              disabled={loading}
+              disabled={loading || readOnly}
+              title={readOnly ? 'Tidak dapat memulai rute pada hari yang sudah ditutup' : 'Mulai Pengantaran'}
             >
               {loading ? (
                 <>
@@ -364,7 +391,8 @@ export default function DeliveryStart() {
                             type="button"
                             className="btn btn-success btn-sm btn-touch flex-fill flex-sm-grow-0 fw-bold"
                             onClick={() => handleMulaiAntar(pasien, idx + 1)}
-                            disabled={startingId === pasien.id}
+                            disabled={startingId === pasien.id || readOnly}
+                            title={readOnly ? 'Mode read-only aktif' : 'Mulai Antar'}
                           >
                             {startingId === pasien.id ? (
                               <>
@@ -446,7 +474,8 @@ export default function DeliveryStart() {
                         type="button"
                         className="btn btn-outline-danger btn-sm btn-touch w-100 w-sm-auto fw-bold"
                         onClick={() => handleSelesaikanPengantaran(peng)}
-                        disabled={completingId === peng.id}
+                        disabled={completingId === peng.id || readOnly}
+                        title={readOnly ? 'Mode read-only aktif' : 'Selesaikan Pengantaran'}
                       >
                         {completingId === peng.id ? (
                           <>

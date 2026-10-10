@@ -26,3 +26,23 @@ export function getJakartaDateString(date = new Date()) {
   return formatter.format(date)
 }
 
+/**
+ * Format string tanggal YYYY-MM-DD menjadi format teks Indonesia (misal: 10 Oktober 2026)
+ */
+export function formatDateIndo(dateStr) {
+  if (!dateStr) return '-'
+  try {
+    const [year, month, day] = dateStr.split('-').map(Number)
+    const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0))
+    return new Intl.DateTimeFormat('id-ID', {
+      timeZone: 'Asia/Jakarta',
+      weekday: 'long',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    }).format(date)
+  } catch {
+    return dateStr
+  }
+}
+

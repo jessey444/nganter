@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { User, MapPin, Phone, Globe, Check, AlertCircle, Loader2 } from 'lucide-react'
 
-export default function PatientForm({ onSuccess, onCancel }) {
+export default function PatientForm({ onSuccess, onCancel, tanggalOperasional }) {
   const [nama, setNama] = useState('')
   const [alamat, setAlamat] = useState('')
   const [nomorWa, setNomorWa] = useState('')
@@ -36,16 +36,20 @@ export default function PatientForm({ onSuccess, onCancel }) {
     setLoading(true)
 
     try {
+      const payload = {
+        nama: nama.trim(),
+        alamat: alamat.trim(),
+        nomor_wa: nomorWa.trim(),
+        alamat_google_maps: alamatGoogleMaps.trim() || null
+      }
+
+      if (tanggalOperasional) {
+        payload.tanggal_operasional = tanggalOperasional
+      }
+
       const { error } = await supabase
         .from('pasien')
-        .insert([
-          {
-            nama: nama.trim(),
-            alamat: alamat.trim(),
-            nomor_wa: nomorWa.trim(),
-            alamat_google_maps: alamatGoogleMaps.trim() || null
-          }
-        ])
+        .insert([payload])
 
       if (error) {
         throw error

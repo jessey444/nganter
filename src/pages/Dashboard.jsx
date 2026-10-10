@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import PatientForm from '../components/PatientForm'
 import RequestLocationButton from '../components/RequestLocationButton'
 import DeliveryStart from '../components/DeliveryStart'
 import PatientEditModal from '../components/PatientEditModal'
-import { getJakartaDateString } from '../lib/utils'
+import { getJakartaDateString, formatDateIndo } from '../lib/utils'
 import {
   Package,
   Clock,
@@ -25,7 +25,9 @@ import {
   Loader2,
   Users,
   Compass,
-  Check
+  Check,
+  History,
+  RotateCcw
 } from 'lucide-react'
 
 export default function Dashboard() {
@@ -39,14 +41,58 @@ export default function Dashboard() {
   const [searchTerm, setSearchTerm] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
 
-  // Penutupan Hari Operasional State
-  const [currentDate] = useState(() => getJakartaDateString())
+  // Date management: default hari ini zona Jakarta
+  const todayJakarta = useMemo(() => getJakartaDateString(), [])
+  const [selectedDate, setSelectedDate] = useState(() => getJakartaDateString())
+  const isViewingToday = selectedDate === todayJakarta
+
+  // Available dates for quick selector
+  const [availableDates, setAvailableDates] = useState([])
+
+  // Status Hari Operasional untuk selectedDate
   const [dayStatus, setDayStatus] = useState(null) // 'BUKA' | 'TUTUP' | null
+  const [dayClosedAt, setDayClosedAt] = useState(null)
+  const isReadOnly = dayStatus === 'TUTUP'
+
+  // Modal Penutupan Hari
   const [showCloseConfirmModal, setShowCloseConfirmModal] = useState(false)
   const [closingDay, setClosingDay] = useState(false)
   const [closureAlert, setClosureAlert] = useState(null) // { type: 'success' | 'danger' | 'warning', text: '' }
 
-  const fetchPasien = async (showLoadingSpinner = true) => {
+  // Pending reminder for yesterday/past unclosed days
+  const [pendingUnclosedAlert, setPendingUnclosedAlert] = useState(null)
+
+  // Fetch unique dates from pasien and hari_operasional
+  const fetchAvailableDates = useCallback(async () => {
+    try {
+      const [pasienDatesRes, dayDatesRes] = await Promise.all([
+        supabase.from('pasien').select('tanggal_operasional').order('tanggal_operasional', { ascending: false }).limit(60),
+        supabase.from('hari_operasional').select('tanggal_operasional').order('tanggal_operasional', { ascending: false }).limit(60)
+      ])
+
+      const dateSet = new Set()
+      dateSet.add(todayJakarta)
+
+      if (pasienDatesRes.data) {
+        pasienDatesRes.data.forEach((p) => {
+          if (p.tanggal_operasional) dateSet.add(p.tanggal_operasional)
+        })
+      }
+      if (dayDatesRes.data) {
+        dayDatesRes.data.forEach((h) => {
+          if (h.tanggal_operasional) dateSet.add(h.tanggal_operasional)
+        })
+      }
+
+      const sorted = Array.from(dateSet).sort((a, b) => b.localeCompare(a))
+      setAvailableDates(sorted)
+    } catch (err) {
+      console.error('Error fetching available dates:', err)
+    }
+  }, [todayJakarta])
+
+  // Fetch pasien strictly filtered by selectedDate
+  const fetchPasien = useCallback(async (showLoadingSpinner = true) => {
     if (showLoadingSpinner) {
       setLoading(true)
     }
@@ -55,6 +101,7 @@ export default function Dashboard() {
       const { data, error } = await supabase
         .from('pasien')
         .select('*')
+        .eq('tanggal_operasional', selectedDate)
         .order('created_at', { ascending: false })
 
       if (error) {
@@ -67,14 +114,15 @@ export default function Dashboard() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [selectedDate])
 
-  const fetchDayStatus = async () => {
+  // Fetch status hari_operasional untuk selectedDate
+  const fetchDayStatus = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('hari_operasional')
-        .select('status')
-        .eq('tanggal_operasional', currentDate)
+        .select('status, waktu_penutupan')
+        .eq('tanggal_operasional', selectedDate)
         .maybeSingle()
 
       if (error && error.code !== 'PGRST116') {
@@ -84,24 +132,62 @@ export default function Dashboard() {
 
       if (data && data.status) {
         setDayStatus(data.status)
+        setDayClosedAt(data.waktu_penutupan || null)
       } else {
         setDayStatus('BUKA')
+        setDayClosedAt(null)
       }
     } catch (err) {
       console.error('Error fetching day status:', err)
       setDayStatus('BUKA')
+      setDayClosedAt(null)
     }
-  }
+  }, [selectedDate])
 
+  // Check unclosed previous days with unfinished packages (Scenario: hari berganti tapi kemarin belum ditutup)
+  const checkPendingUnclosedDays = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('pasien')
+        .select('tanggal_operasional, status')
+        .lt('tanggal_operasional', todayJakarta)
+        .neq('status', 'SELESAI')
+        .order('tanggal_operasional', { ascending: false })
+        .limit(10)
+
+      if (!error && data && data.length > 0) {
+        const uniquePendingDates = [...new Set(data.map((d) => d.tanggal_operasional))]
+        setPendingUnclosedAlert({
+          count: data.length,
+          dates: uniquePendingDates
+        })
+      } else {
+        setPendingUnclosedAlert(null)
+      }
+    } catch (err) {
+      console.error('Error checking unclosed days:', err)
+    }
+  }, [todayJakarta])
+
+  // Load data whenever selectedDate changes
   useEffect(() => {
     let isSubscribed = true
 
-    const loadInitialData = async () => {
+    const loadData = async () => {
+      setLoading(true)
       setErrorMsg('')
       try {
         const [pasienRes, dayRes] = await Promise.all([
-          supabase.from('pasien').select('*').order('created_at', { ascending: false }),
-          supabase.from('hari_operasional').select('status').eq('tanggal_operasional', currentDate).maybeSingle()
+          supabase
+            .from('pasien')
+            .select('*')
+            .eq('tanggal_operasional', selectedDate)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('hari_operasional')
+            .select('status, waktu_penutupan')
+            .eq('tanggal_operasional', selectedDate)
+            .maybeSingle()
         ])
 
         if (pasienRes.error) {
@@ -112,8 +198,10 @@ export default function Dashboard() {
           setPasienList(pasienRes.data || [])
           if (dayRes.data && dayRes.data.status) {
             setDayStatus(dayRes.data.status)
+            setDayClosedAt(dayRes.data.waktu_penutupan || null)
           } else {
             setDayStatus('BUKA')
+            setDayClosedAt(null)
           }
         }
       } catch (err) {
@@ -127,14 +215,16 @@ export default function Dashboard() {
       }
     }
 
-    loadInitialData()
+    loadData()
+    fetchAvailableDates()
+    checkPendingUnclosedDays()
 
     return () => {
       isSubscribed = false
     }
-  }, [currentDate])
+  }, [selectedDate, fetchAvailableDates, checkPendingUnclosedDays])
 
-  // Hitungan Statistik Real-Time
+  // Hitungan Statistik Real-Time KHUSUS untuk selectedDate
   const stats = useMemo(() => {
     const total = pasienList.length
     const menunggu = pasienList.filter((p) => p.status === 'MENUNGGU_LOKASI').length
@@ -164,7 +254,7 @@ export default function Dashboard() {
 
     try {
       const { data, error } = await supabase.rpc('tutup_hari_operasional', {
-        p_tanggal: currentDate
+        p_tanggal: selectedDate
       })
 
       if (error) {
@@ -174,11 +264,14 @@ export default function Dashboard() {
       if (data && data.success === true) {
         setClosureAlert({
           type: 'success',
-          text: data.message || `Hari operasional ${currentDate} berhasil ditutup.`
+          text: data.message || `Hari operasional ${selectedDate} berhasil ditutup.`
         })
         setDayStatus('TUTUP')
+        setDayClosedAt(new Date().toISOString())
         setShowCloseConfirmModal(false)
         await fetchPasien(false)
+        await fetchAvailableDates()
+        await checkPendingUnclosedDays()
       } else {
         const unfinishedCount = data?.jumlah_belum_selesai || data?.unfinished_count
         let detailText = (data && data.message) || 'Gagal menutup hari operasional.'
@@ -253,6 +346,7 @@ export default function Dashboard() {
     setShowForm(false)
     fetchPasien(false)
     fetchDayStatus()
+    fetchAvailableDates()
   }
 
   const handleEditSuccess = () => {
@@ -267,7 +361,7 @@ export default function Dashboard() {
           ==================================================================== */}
       <header className="app-header py-3 px-3 px-md-4">
         <div className="container-fluid px-0 px-lg-3">
-          <div className="d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center gap-3">
+          <div className="d-flex flex-column flex-lg-row justify-content-between align-items-start align-items-lg-center gap-3">
             {/* Identity & Status */}
             <div className="d-flex align-items-center gap-3">
               <div className="brand-badge">
@@ -276,20 +370,61 @@ export default function Dashboard() {
               <div>
                 <div className="d-flex align-items-center gap-2">
                   <h1 className="h4 mb-0 fw-bold text-navy-900">Nganter</h1>
-                  <span className="badge bg-primary-50 text-primary-700 border border-primary-100 fw-semibold fs-7">
+                  <span className="bg-primary-50 text-primary-700 border border-primary-100 fw-semibold fs-7 px-2 py-0.5 rounded-pill">
                     Sistem Logistik Obat
                   </span>
                 </div>
                 <div className="d-flex align-items-center gap-2 flex-wrap mt-1">
-                  <span className="header-date-badge">
-                    <Calendar size={13} />
-                    <span>{currentDate} (WIB)</span>
-                  </span>
+                  {/* Selector Tanggal Operasional */}
+                  <div className="d-inline-flex align-items-center gap-1.5 header-date-badge">
+                    <Calendar size={13} className="text-primary-600 flex-shrink-0" />
+                    <label htmlFor="select-tanggal-operasional" className="visually-hidden">
+                      Pilih Tanggal Operasional
+                    </label>
+                    <select
+                      id="select-tanggal-operasional"
+                      className="header-date-input"
+                      value={selectedDate}
+                      onChange={(e) => {
+                        setSelectedDate(e.target.value)
+                        setClosureAlert(null)
+                      }}
+                      title="Pilih tanggal operasional"
+                    >
+                      <option value={todayJakarta}>
+                        Hari Ini ({todayJakarta}) {todayJakarta === selectedDate ? '• Aktif' : ''}
+                      </option>
+                      {availableDates
+                        .filter((d) => d !== todayJakarta)
+                        .map((dateStr) => (
+                          <option key={dateStr} value={dateStr}>
+                            {dateStr} ({formatDateIndo(dateStr)})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
 
+                  {/* Tombol kembali ke hari ini jika sedang melihat riwayat */}
+                  {!isViewingToday && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline-primary py-1 px-2.5 fs-7"
+                      onClick={() => {
+                        setSelectedDate(todayJakarta)
+                        setClosureAlert(null)
+                      }}
+                      title="Kembali ke operasional hari ini"
+                    >
+                      <RotateCcw size={12} />
+                      <span>Ke Hari Ini</span>
+                    </button>
+                  )}
+
+                  {/* Status Badge */}
                   {dayStatus === 'TUTUP' ? (
-                    <span className="header-status-pill header-status-closed">
+                    <span className="header-status-pill header-status-closed" title={dayClosedAt ? `Ditutup pada: ${new Date(dayClosedAt).toLocaleString('id-ID')}` : 'Hari sudah ditutup'}>
                       <Lock size={12} />
-                      <span>Operasional Ditutup</span>
+                      <span>Hari Ditutup (Read-Only)</span>
                     </span>
                   ) : (
                     <span className="header-status-pill header-status-open">
@@ -302,14 +437,14 @@ export default function Dashboard() {
             </div>
 
             {/* Action Buttons */}
-            <div className="d-flex flex-column flex-sm-row align-items-stretch align-items-sm-center gap-2 w-100 w-md-auto">
+            <div className="d-flex flex-column flex-sm-row align-items-stretch align-items-sm-center gap-2 w-100 w-lg-auto">
               {/* Tombol Selesaikan Hari Ini */}
               <button
                 type="button"
                 className="btn btn-outline-danger btn-touch px-3"
                 onClick={() => setShowCloseConfirmModal(true)}
                 disabled={closingDay || dayStatus === 'TUTUP'}
-                title={dayStatus === 'TUTUP' ? 'Hari operasional ini sudah ditutup' : 'Selesaikan dan tutup hari operasional'}
+                title={dayStatus === 'TUTUP' ? 'Hari operasional tanggal ini sudah ditutup' : `Selesaikan dan tutup hari operasional (${selectedDate})`}
               >
                 <Lock size={15} />
                 <span>{dayStatus === 'TUTUP' ? 'Hari Ditutup' : 'Selesaikan Hari Ini'}</span>
@@ -321,7 +456,7 @@ export default function Dashboard() {
                 className="btn btn-primary btn-touch px-4 shadow-sm"
                 onClick={() => setShowForm(true)}
                 disabled={dayStatus === 'TUTUP'}
-                title={dayStatus === 'TUTUP' ? 'Hari operasional sudah ditutup, paket baru tidak dapat dibuat.' : 'Tambah Pasien Baru'}
+                title={dayStatus === 'TUTUP' ? 'Hari operasional tanggal ini sudah ditutup, paket baru tidak dapat dibuat.' : 'Tambah Pasien Baru'}
               >
                 <Plus size={18} />
                 <span>Tambah Pasien</span>
@@ -333,6 +468,56 @@ export default function Dashboard() {
 
       {/* Main Container */}
       <div className="container-fluid px-3 px-md-4 py-4 flex-grow-1" style={{ maxWidth: '1400px' }}>
+        {/* Banner Riwayat Tanggal Lampau */}
+        {!isViewingToday && (
+          <div className="history-banner mb-3 shadow-xs">
+            <div className="d-flex align-items-center gap-2">
+              <History size={18} className="text-primary-600 flex-shrink-0" />
+              <div>
+                <span className="fw-bold text-navy-900 small">Mode Arsip Riwayat: </span>
+                <span className="text-navy-700 small">
+                  Anda sedang melihat data operasional tanggal <strong>{formatDateIndo(selectedDate)}</strong> ({selectedDate}).
+                </span>
+                {dayStatus === 'TUTUP' && (
+                  <span className="badge bg-danger-subtle text-danger border border-danger-subtle ms-2 fs-7">
+                    Arsip Terkunci
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary py-1 px-3 fs-7"
+              onClick={() => setSelectedDate(todayJakarta)}
+            >
+              Kembali ke Hari Ini
+            </button>
+          </div>
+        )}
+
+        {/* Peringatan Hari Kemarin Belum Ditutup (Tahap 5) */}
+        {isViewingToday && pendingUnclosedAlert && (
+          <div className="alert alert-warning py-2.5 px-3 mb-3 d-flex align-items-start justify-content-between gap-2 rounded-3 shadow-xs border border-warning" role="alert">
+            <div className="d-flex align-items-start gap-2">
+              <AlertTriangle size={18} className="text-warning-emphasis flex-shrink-0 mt-0.5" />
+              <div className="small">
+                <strong>Peringatan Pengantaran Tertunda: </strong>
+                Terdapat <strong>{pendingUnclosedAlert.count} paket</strong> dari hari sebelumnya ({pendingUnclosedAlert.dates.join(', ')}) yang belum berstatus <strong>SELESAI</strong>.
+                <div className="mt-1">
+                  Sistem tidak memindahkan paket secara otomatis. Anda dapat memilih tanggal tersebut melalui selector tanggal di header untuk menyelesaikan atau menutup hari sebelumnya.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-dark py-1 px-2.5 fs-7 flex-shrink-0"
+              onClick={() => setSelectedDate(pendingUnclosedAlert.dates[0])}
+            >
+              Buka {pendingUnclosedAlert.dates[0]}
+            </button>
+          </div>
+        )}
+
         {/* Alert Notifikasi Penutupan Hari */}
         {closureAlert && (
           <div className={`alert alert-${closureAlert.type} alert-dismissible fade show mb-4 d-flex align-items-center justify-content-between rounded-3 shadow-sm`} role="alert">
@@ -354,7 +539,7 @@ export default function Dashboard() {
         )}
 
         {/* ====================================================================
-            Ringkasan Statistik (5 KPI Cards with Real State Counts)
+            Ringkasan Statistik (5 KPI Cards strictly for selectedDate)
             ==================================================================== */}
         <section className="mb-4" aria-label="Ringkasan Statistik">
           <div className="row g-2 g-md-3">
@@ -363,7 +548,7 @@ export default function Dashboard() {
               <div
                 className={`stat-card h-100 ${statusFilter === 'ALL' ? 'stat-card-active' : ''}`}
                 onClick={() => setStatusFilter('ALL')}
-                title="Tampilkan seluruh pasien"
+                title="Tampilkan seluruh pasien untuk tanggal ini"
               >
                 <div className="d-flex justify-content-between align-items-start mb-2">
                   <span className="stat-label">Total Pasien</span>
@@ -456,7 +641,11 @@ export default function Dashboard() {
         {/* ====================================================================
             Panel Operasional Pengantaran (GPS & Routing)
             ==================================================================== */}
-        <DeliveryStart />
+        <DeliveryStart
+          selectedDate={selectedDate}
+          readOnly={isReadOnly}
+          refreshTrigger={pasienList.length}
+        />
 
         {/* Global Error Banner */}
         {errorMsg && (
@@ -478,10 +667,17 @@ export default function Dashboard() {
               {/* Title & Total Count */}
               <div className="d-flex align-items-center gap-2">
                 <Users size={20} className="text-primary-600" />
-                <h5 className="fw-bold mb-0 text-navy-900 fs-6 fs-md-5">Daftar Pasien Hari Ini</h5>
+                <h5 className="fw-bold mb-0 text-navy-900 fs-6 fs-md-5">
+                  Daftar Pasien ({selectedDate})
+                </h5>
                 <span className="badge bg-navy-100 text-navy-700 border font-monospace px-2.5 py-1">
                   {filteredPasienList.length} / {pasienList.length}
                 </span>
+                {isReadOnly && (
+                  <span className="badge bg-secondary-subtle text-secondary border font-monospace px-2 py-0.5 fs-7">
+                    Arsip Read-Only
+                  </span>
+                )}
               </div>
 
               {/* Search Bar */}
@@ -567,7 +763,7 @@ export default function Dashboard() {
               <div className="d-flex justify-content-center mb-2">
                 <Loader2 size={32} className="text-primary-600 animate-spin" />
               </div>
-              <p className="text-navy-600 fw-medium mb-0">Memuat data pasien...</p>
+              <p className="text-navy-600 fw-medium mb-0">Memuat data pasien untuk {selectedDate}...</p>
             </div>
           ) : filteredPasienList.length === 0 ? (
             /* Empty State */
@@ -579,12 +775,14 @@ export default function Dashboard() {
                 <h5 className="fw-bold text-navy-900 mb-1">
                   {searchTerm || statusFilter !== 'ALL'
                     ? 'Tidak Ada Pasien yang Sesuai'
-                    : 'Belum Ada Data Pasien Hari Ini'}
+                    : `Belum Ada Data Pasien untuk ${formatDateIndo(selectedDate)}`}
                 </h5>
                 <p className="text-navy-500 small mb-4" style={{ maxWidth: '440px', margin: '0 auto' }}>
                   {searchTerm || statusFilter !== 'ALL'
                     ? 'Silakan ubah kata kunci pencarian atau sesuaikan filter status di atas.'
-                    : 'Mulai operasional hari ini dengan menambahkan data pasien dan resep obat yang akan diantarkan.'}
+                    : isViewingToday
+                    ? 'Mulai operasional hari ini dengan menambahkan data pasien dan resep obat yang akan diantarkan.'
+                    : 'Tidak ada data pengantaran obat yang tercatat pada tanggal riwayat ini.'}
                 </p>
 
                 {searchTerm || statusFilter !== 'ALL' ? (
@@ -598,17 +796,16 @@ export default function Dashboard() {
                   >
                     Reset Filter Pencarian
                   </button>
-                ) : (
+                ) : isViewingToday && !isReadOnly ? (
                   <button
                     type="button"
                     className="btn btn-primary btn-touch px-4"
                     onClick={() => setShowForm(true)}
-                    disabled={dayStatus === 'TUTUP'}
                   >
                     <Plus size={16} />
                     <span>Tambah Pasien Pertama</span>
                   </button>
-                )}
+                ) : null}
               </div>
             </div>
           ) : (
@@ -678,27 +875,29 @@ export default function Dashboard() {
                       </div>
 
                       {/* Action Bar (Edit & Minta Lokasi) */}
-                      <div className="pt-2.5 mt-2.5 border-top d-flex flex-wrap gap-2">
-                        {/* Tombol Edit Pasien hanya untuk status belum SELESAI */}
-                        {pasien.status !== 'SELESAI' && (
-                          <button
-                            type="button"
-                            className="btn btn-outline-primary btn-sm btn-touch flex-fill"
-                            onClick={() => setEditingPasien(pasien)}
-                            title="Edit data pasien"
-                          >
-                            <Pencil size={14} />
-                            <span>Edit</span>
-                          </button>
-                        )}
+                      {!isReadOnly && (
+                        <div className="pt-2.5 mt-2.5 border-top d-flex flex-wrap gap-2">
+                          {/* Tombol Edit Pasien hanya untuk status belum SELESAI */}
+                          {pasien.status !== 'SELESAI' && (
+                            <button
+                              type="button"
+                              className="btn btn-outline-primary btn-sm btn-touch flex-fill"
+                              onClick={() => setEditingPasien(pasien)}
+                              title="Edit data pasien"
+                            >
+                              <Pencil size={14} />
+                              <span>Edit</span>
+                            </button>
+                          )}
 
-                        {/* Tombol Minta Lokasi hanya untuk status MENUNGGU_LOKASI */}
-                        {pasien.status === 'MENUNGGU_LOKASI' && (
-                          <div className="flex-fill">
-                            <RequestLocationButton pasien={pasien} />
-                          </div>
-                        )}
-                      </div>
+                          {/* Tombol Minta Lokasi hanya untuk status MENUNGGU_LOKASI */}
+                          {pasien.status === 'MENUNGGU_LOKASI' && (
+                            <div className="flex-fill">
+                              <RequestLocationButton pasien={pasien} />
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -723,7 +922,9 @@ export default function Dashboard() {
               <div className="modal-header bg-white border-bottom py-3 px-4 d-flex justify-content-between align-items-center">
                 <div>
                   <h5 className="modal-title fw-bold text-navy-900 mb-0">Tambah Pasien Baru</h5>
-                  <small className="text-navy-500">Input data pasien &amp; alamat pengantaran obat</small>
+                  <small className="text-navy-500">
+                    Input data pasien untuk operasional tanggal <strong>{selectedDate}</strong>
+                  </small>
                 </div>
                 <button
                   type="button"
@@ -736,6 +937,7 @@ export default function Dashboard() {
               </div>
               <div className="modal-body p-4">
                 <PatientForm
+                  tanggalOperasional={selectedDate}
                   onSuccess={handleFormSuccess}
                   onCancel={() => setShowForm(false)}
                 />
@@ -791,11 +993,18 @@ export default function Dashboard() {
 
                 <div className="p-3 bg-light rounded-3 border mb-3 text-center">
                   <span className="fw-bold font-monospace fs-5 text-navy-900">
-                    {currentDate}
+                    {selectedDate} ({formatDateIndo(selectedDate)})
                   </span>
                 </div>
 
-                {stats.belumSelesai > 0 ? (
+                {stats.total === 0 ? (
+                  <div className="alert alert-warning py-2.5 px-3 small d-flex align-items-start gap-2 rounded-3 mb-3">
+                    <AlertTriangle size={18} className="text-warning-emphasis flex-shrink-0 mt-0.5" />
+                    <div>
+                      <strong>Perhatian:</strong> Belum ada data pasien pada tanggal <strong>{selectedDate}</strong>. Anda tidak disarankan menutup hari yang kosong.
+                    </div>
+                  </div>
+                ) : stats.belumSelesai > 0 ? (
                   <div className="alert alert-warning py-2.5 px-3 small d-flex align-items-start gap-2 rounded-3 mb-3">
                     <AlertTriangle size={18} className="text-warning-emphasis flex-shrink-0 mt-0.5" />
                     <div>
@@ -806,7 +1015,7 @@ export default function Dashboard() {
                   <div className="alert alert-success py-2.5 px-3 small d-flex align-items-center gap-2 rounded-3 mb-3">
                     <Check size={18} className="text-success flex-shrink-0" />
                     <div>
-                      Semua paket obat hari ini telah berstatus <strong>SELESAI</strong>. Hari operasional siap ditutup.
+                      Semua paket obat ({stats.total} pasien) pada tanggal ini telah berstatus <strong>SELESAI</strong>. Hari operasional siap ditutup.
                     </div>
                   </div>
                 )}
@@ -829,7 +1038,7 @@ export default function Dashboard() {
                   type="button"
                   className="btn btn-danger btn-touch px-4 fw-bold"
                   onClick={executeTutupHari}
-                  disabled={closingDay}
+                  disabled={closingDay || stats.total === 0 || stats.belumSelesai > 0}
                 >
                   {closingDay ? (
                     <>
